@@ -26,8 +26,10 @@ struct TrackInfoView: View {
     @State private var isHoveringArt = false
     @State private var expertMode    = false
     @State private var writeError: String? = nil
-    @State private var showError     = false
+    @State private var showError      = false
     @State private var showTipPopover = false
+    @State private var titleCopied    = false   // brief ✓ feedback on header tap
+    @State private var artPasteFlash  = false   // brief green border on Cmd+V paste
 
     // MARK: Body
 
@@ -36,31 +38,11 @@ struct TrackInfoView: View {
             headerBar
             Divider()
 
-            VStack(spacing: 8) {
-                // Top section: artwork + 4 main fields side-by-side
-                HStack(alignment: .top, spacing: 16) {
-                    artworkPanel
-                        .frame(width: 156, height: 156)
-                    mainFieldsColumn
-                }
-
-                // Second row: Year / Track / BPM
-                HStack(spacing: 10) {
-                    stackedField("Year",   tracked($meta.year),         width: 62)
-                    stackedField("Track",  tracked($meta.trackNumber),  width: 50)
-                    stackedField("BPM",    tracked($meta.bpm),          width: 50)
-                    Spacer(minLength: 0)
-                }
-
-                // Third row: Comment (full width)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Comment")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    TextField("", text: tracked($meta.comment))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
-                }
+            // Artwork left | all fields right — single HStack
+            HStack(alignment: .top, spacing: 16) {
+                artworkPanel
+                    .frame(width: 156, height: 156)
+                mainFieldsColumn
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -82,16 +64,41 @@ struct TrackInfoView: View {
         } message: {
             Text(writeError ?? "Unknown error.")
         }
+        // Cmd+V — paste image from clipboard as new artwork.
+        // Fires when no text field holds focus (text fields handle their own paste natively).
+        .background(
+            Button("") { pasteArtworkFromClipboard() }
+                .keyboardShortcut("v", modifiers: .command)
+                .opacity(0)
+                .allowsHitTesting(false)
+        )
     }
 
     // MARK: Header
 
     private var headerBar: some View {
         HStack {
-            Text(playlist.tracks[safe: currentIndex]?.displayName ?? "Track Info")
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            // Tap to copy track name to clipboard.
+            // Colour flips to accentColor for 1.5 s as confirmation.
+            HStack(spacing: 4) {
+                Text(playlist.tracks[safe: currentIndex]?.displayName ?? "Track Info")
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(titleCopied ? Color.accentColor : Color.primary)
+
+                if titleCopied {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .transition(.opacity.combined(with: .scale))
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: titleCopied)
+            .contentShape(Rectangle())
+            .onTapGesture { copyTitleToClipboard() }
+            .help("Click to copy")
+
             Spacer()
             Button { dismiss() } label: {
                 Image(systemName: "xmark.circle.fill")
@@ -109,7 +116,7 @@ struct TrackInfoView: View {
     private var artworkPanel: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(hex: "D0D0D0"))
+                .fill(Color(light: "D0D0D0", dark: "404040"))
 
             if let img = meta.artwork {
                 Image(nsImage: img)
@@ -142,8 +149,18 @@ struct TrackInfoView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        // Flash green border for 0.8 s after a successful Cmd+V paste
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.green, lineWidth: 2)
+                .opacity(artPasteFlash ? 1 : 0)
+                .animation(.easeOut(duration: 0.15), value: artPasteFlash)
+        )
         .onHover { isHoveringArt = $0 }
         .animation(.easeInOut(duration: 0.12), value: isHoveringArt)
+        .help(meta.artwork == nil
+              ? "Change… or ⌘V to paste from clipboard"
+              : "Change… / Remove on hover · ⌘V to paste")
     }
 
     // MARK: Main fields column (Title / Artist / Album / Genre)
@@ -154,6 +171,24 @@ struct TrackInfoView: View {
             stackedField("Artist", tracked($meta.artist))
             stackedField("Album",  tracked($meta.album))
             stackedField("Genre",  tracked($meta.genre))
+
+            // Year / Track / BPM inline
+            HStack(spacing: 10) {
+                stackedField("Year",   tracked($meta.year),        width: 58)
+                stackedField("Track",  tracked($meta.trackNumber), width: 46)
+                stackedField("BPM",    tracked($meta.bpm),         width: 46)
+                Spacer(minLength: 0)
+            }
+
+            // Comment
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Comment")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                TextField("", text: tracked($meta.comment))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -220,26 +255,6 @@ struct TrackInfoView: View {
 
             Spacer()
 
-            // ☕ Tip jar
-            Button { showTipPopover.toggle() } label: {
-                Image(systemName: "mug.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Buy me a coffee")
-            .popover(isPresented: $showTipPopover, arrowEdge: .top) {
-                VStack(spacing: 10) {
-                    Text("Buy me a coffee ☕")
-                        .font(.system(size: 13, weight: .semibold))
-                    Link("paypal.me/oleinikovs",
-                         destination: URL(string: "https://paypal.me/oleinikovs")!)
-                        .font(.system(size: 12))
-                }
-                .padding(16)
-                .frame(minWidth: 180)
-            }
-
             // ← [Save/spinner] →
             HStack(spacing: 4) {
                 Button {
@@ -270,6 +285,30 @@ struct TrackInfoView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(currentIndex >= playlist.tracks.count - 1)
+            }
+
+            // ☕ Tip jar — right of navigation arrows
+            Button { showTipPopover.toggle() } label: {
+                Image(systemName: "mug.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Buy me a coffee")
+            .padding(.leading, 10)
+            .popover(isPresented: $showTipPopover, arrowEdge: .top) {
+                VStack(spacing: 10) {
+                    Text("Buy me a coffee ☕")
+                        .font(.system(size: 13, weight: .semibold))
+                    Link("paypal.me/oleinikovs",
+                         destination: URL(string: "https://paypal.me/oleinikovs")!)
+                        .font(.system(size: 12))
+                    Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(16)
+                .frame(minWidth: 180)
             }
         }
         .padding(.horizontal, 14)
@@ -364,6 +403,12 @@ struct TrackInfoView: View {
         do {
             try MetadataIO.write(meta, to: targetURL)
             isDirty = false
+            // Sync the in-memory playlist so the row updates immediately
+            playlist.updateTags(
+                for:    track.id,
+                title:  meta.title.isEmpty  ? nil : meta.title,
+                artist: meta.artist.isEmpty ? nil : meta.artist
+            )
             return true
         } catch {
             if !silent {
@@ -376,6 +421,29 @@ struct TrackInfoView: View {
 
     private func trySaveAndClose() {
         if trySave() { dismiss() }
+    }
+
+    // MARK: Title copy
+
+    private func copyTitleToClipboard() {
+        let name = playlist.tracks[safe: currentIndex]?.displayName ?? ""
+        guard !name.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(name, forType: .string)
+        titleCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { titleCopied = false }
+    }
+
+    // MARK: Artwork paste (Cmd+V)
+
+    private func pasteArtworkFromClipboard() {
+        guard let raw = NSImage(pasteboard: NSPasteboard.general) else { return }
+        // Resize to ≤800×800 and compress to JPEG q=0.75 before storing.
+        meta.artwork = raw.jpegThumbnail(maxSide: 800, quality: 0.75) ?? raw
+        isDirty = true
+        // Brief green flash to confirm
+        artPasteFlash = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { artPasteFlash = false }
     }
 
     // MARK: Artwork picker
@@ -398,5 +466,59 @@ struct TrackInfoView: View {
 extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
+    }
+}
+
+// MARK: - NSImage JPEG thumbnail helper
+
+private extension NSImage {
+
+    /// Returns a new 800×800 JPEG NSImage using cover-fill:
+    /// the image is scaled so the shorter side = 800 px, then center-cropped
+    /// to a perfect square.  No letterboxing, no distortion.
+    /// Quality 0…1 maps to JPEG compressionFactor.
+    func jpegThumbnail(maxSide: CGFloat, quality: CGFloat) -> NSImage? {
+        let src = size
+        guard src.width > 0, src.height > 0 else { return nil }
+
+        // Scale so the SHORTER side fills the square (cover semantics)
+        let scale   = maxSide / min(src.width, src.height)
+        let scaled  = NSSize(width:  src.width  * scale,
+                             height: src.height * scale)
+
+        // Center-crop offset: how far outside the 800×800 canvas the scaled image starts
+        let dx = (scaled.width  - maxSide) / 2
+        let dy = (scaled.height - maxSide) / 2
+
+        // 800×800 RGB bitmap (no alpha — JPEG doesn't support it)
+        guard let bmp = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide:       Int(maxSide),
+            pixelsHigh:       Int(maxSide),
+            bitsPerSample:    8,
+            samplesPerPixel:  3,
+            hasAlpha:         false,
+            isPlanar:         false,
+            colorSpaceName:   .deviceRGB,
+            bytesPerRow:      0,
+            bitsPerPixel:     0
+        ) else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bmp)
+
+        // Draw scaled image shifted left/up so only the center square is captured
+        draw(in:        NSRect(x: -dx, y: -dy, width: scaled.width, height: scaled.height),
+             from:      NSRect(origin: .zero, size: src),
+             operation: .copy,
+             fraction:  1.0)
+
+        guard let jpegData = bmp.representation(using: .jpeg,
+                                                 properties: [.compressionFactor: quality]),
+              let result    = NSImage(data: jpegData)
+        else { return nil }
+
+        return result
     }
 }

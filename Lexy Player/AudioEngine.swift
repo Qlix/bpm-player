@@ -66,7 +66,8 @@ final class AudioEngine: ObservableObject {
 
     // MARK: Load task (cancel on new load)
 
-    private var loadTask: Task<Void, Never>?
+    private var loadTask:    Task<Void, Never>?
+    private var bpmScanTask: Task<Void, Never>?
 
     // MARK: Playback tracking
 
@@ -85,6 +86,7 @@ final class AudioEngine: ObservableObject {
     // MARK: File loading  (optimistic UI + async decode)
 
     func loadURL(_ url: URL) {
+        print("🎵 [AudioEngine.loadURL] \(url.path)")
         // Cancel any in-flight decode from a previous call
         loadTask?.cancel()
 
@@ -107,13 +109,36 @@ final class AudioEngine: ObservableObject {
                 self.pcmRight       = pcm.right
                 self.fileSampleRate = pcm.sampleRate
                 self.duration       = pcm.duration
+                print("🎵 [AudioEngine] decode done → rebuildSourceNode + resumePlayback")
                 self.rebuildSourceNode()
                 self.resumePlayback()
             } catch {
                 guard !Task.isCancelled else { return }
+                print("🎵 [AudioEngine] decode ERROR: \(error)")
                 self.fileName = url.lastPathComponent + " — Error reading file"
                 self.hasFile  = false
             }
+        }
+    }
+
+    /// Load a file opened externally (Finder double-click / file association).
+    ///
+    /// - Clears `detectedBPM` immediately so the BPM field resets at once.
+    /// - Delegates to `loadURL` for the existing fast decode + playback path.
+    /// - Starts a low-priority BPM scan in parallel; on completion updates
+    ///   `detectedBPM`, which ContentView observes via `.onChange`.
+    func loadExternalURL(_ url: URL) {
+        detectedBPM = 0          // clear old value right away
+        loadURL(url)             // fast path unchanged
+
+        bpmScanTask?.cancel()
+        bpmScanTask = Task {
+            guard let file = try? AVAudioFile(forReading: url) else { return }
+            let bpm = await Task.detached(priority: .background) {
+                BPMDetector.detect(file: file)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.detectedBPM = bpm   // @Published → ContentView re-renders
         }
     }
 
@@ -362,8 +387,12 @@ final class AudioEngine: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: .audioEngineTrackEnded, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self, self.scheduleGen == myGen else { return }
-            self.handleNaturalEnd()
+            // Swift 6: observer closure is @Sendable, so MainActor members
+            // must be accessed inside an explicit Task { @MainActor in }.
+            Task { @MainActor [weak self] in
+                guard let self, self.scheduleGen == myGen else { return }
+                self.handleNaturalEnd()
+            }
         }
     }
 

@@ -14,6 +14,8 @@ struct TrackMetadata {
     var comment:     String   = ""
     var artwork:     NSImage? = nil
     var fileName:    String   = ""   // without extension (Expert Mode rename)
+
+    nonisolated init() {}
 }
 
 // MARK: - Metadata I/O
@@ -37,7 +39,7 @@ enum MetadataIO {
     // (ID3v1 tail). This avoids a 50-300 MB allocation that would compete with the audio
     // engine's PCM prefetch and cause audio dropouts on first open.
 
-    static func read(from url: URL) -> TrackMetadata {
+    nonisolated static func read(from url: URL) -> TrackMetadata {
         var meta = TrackMetadata()
         meta.fileName = url.deletingPathExtension().lastPathComponent
 
@@ -70,8 +72,8 @@ enum MetadataIO {
 
     /// Read the first `headBytes` bytes and the last 128 bytes of a file without
     /// loading the whole file. Uses FileHandle (explicit reads, not mmap).
-    private static func readHeadAndTail(url: URL, headBytes: Int) -> (head: Data, tail: Data)? {
-        guard let fh = FileHandle(forReadingAtPath: url.path) else { return nil }
+    nonisolated private static func readHeadAndTail(url: URL, headBytes: Int) -> (head: Data, tail: Data)? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { fh.closeFile() }
         let head     = fh.readData(ofLength: headBytes)
         let fileSize = Int(fh.seekToEndOfFile())
@@ -85,7 +87,7 @@ enum MetadataIO {
 
     // MARK: ID3v2 parser  (MP3 — header at byte 0)
 
-    private static func parseID3v2(_ fileData: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseID3v2(_ fileData: Data, into meta: inout TrackMetadata) {
         guard fileData.count >= 10,
               fileData[0] == 0x49, fileData[1] == 0x44, fileData[2] == 0x33  // "ID3"
         else { return }
@@ -113,7 +115,7 @@ enum MetadataIO {
     }
 
     // ID3v2.2 — 3-byte IDs, 3-byte big-endian sizes
-    private static func parseV22Frames(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseV22Frames(_ data: Data, into meta: inout TrackMetadata) {
         var i = 0
         while i + 6 <= data.count {
             guard let id = ascii(data, at: i, len: 3), id != "\0\0\0" else { break }
@@ -137,7 +139,7 @@ enum MetadataIO {
     }
 
     // ID3v2.3 / v2.4 — 4-byte IDs, 4-byte sizes
-    private static func parseV23Frames(_ data: Data, synchsafe: Bool, into meta: inout TrackMetadata) {
+    nonisolated private static func parseV23Frames(_ data: Data, synchsafe: Bool, into meta: inout TrackMetadata) {
         var i = 0
         while i + 10 <= data.count {
             guard let id = ascii(data, at: i, len: 4), id != "\0\0\0\0" else { break }
@@ -165,7 +167,7 @@ enum MetadataIO {
     // MARK: ID3v1
 
     /// Parse ID3v1 from an exactly-128-byte tail (read via FileHandle — index 0 = first byte).
-    private static func parseID3v1Tail(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseID3v1Tail(_ data: Data, into meta: inout TrackMetadata) {
         guard data.count >= 128,
               data[0] == 0x54, data[1] == 0x41, data[2] == 0x47 else { return }  // "TAG"
         parseID3v1Bytes(data, base: 0, into: &meta)
@@ -173,14 +175,14 @@ enum MetadataIO {
 
     /// Parse ID3v1 from the last 128 bytes of an arbitrary-length Data block
     /// (used by AIFF / WAV embedded ID3 chunk parsers).
-    private static func parseID3v1(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseID3v1(_ data: Data, into meta: inout TrackMetadata) {
         guard data.count >= 128 else { return }
         let base = data.count - 128
         guard data[base] == 0x54, data[base+1] == 0x41, data[base+2] == 0x47 else { return }
         parseID3v1Bytes(data, base: base, into: &meta)
     }
 
-    private static func parseID3v1Bytes(_ data: Data, base: Int, into meta: inout TrackMetadata) {
+    nonisolated private static func parseID3v1Bytes(_ data: Data, base: Int, into meta: inout TrackMetadata) {
         func str(_ off: Int, _ len: Int) -> String {
             let slice = data[(base+off)..<(base+off+len)].prefix { $0 != 0 }
             return (String(bytes: slice, encoding: .isoLatin1) ?? "").trimmingCharacters(in: .whitespaces)
@@ -202,7 +204,7 @@ enum MetadataIO {
 
     // MARK: AIFF parser  (IFF container, big-endian chunk sizes)
 
-    private static func parseAIFF(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseAIFF(_ data: Data, into meta: inout TrackMetadata) {
         guard data.count >= 12,
               data[0]==0x46, data[1]==0x4F, data[2]==0x52, data[3]==0x4D,  // "FORM"
               data[8]==0x41, data[9]==0x49                                   // "AI…"
@@ -227,7 +229,7 @@ enum MetadataIO {
 
     // MARK: FLAC / Vorbis Comments
 
-    private static func parseFLAC(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseFLAC(_ data: Data, into meta: inout TrackMetadata) {
         guard data.count >= 4,
               data[0]==0x66, data[1]==0x4C, data[2]==0x61, data[3]==0x43  // "fLaC"
         else { return }
@@ -250,7 +252,7 @@ enum MetadataIO {
         }
     }
 
-    private static func parseVorbisComments(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseVorbisComments(_ data: Data, into meta: inout TrackMetadata) {
         var pos = 0
         guard pos + 4 <= data.count else { return }
         let vendorLen = Int(leu32(data, at: pos)); pos += 4 + vendorLen
@@ -267,7 +269,7 @@ enum MetadataIO {
         }
     }
 
-    private static func applyVorbis(_ kv: String, to meta: inout TrackMetadata) {
+    nonisolated private static func applyVorbis(_ kv: String, to meta: inout TrackMetadata) {
         guard let eq = kv.firstIndex(of: "=") else { return }
         let key   = kv[..<eq].uppercased()
         let value = String(kv[kv.index(after: eq)...])
@@ -285,7 +287,7 @@ enum MetadataIO {
         }
     }
 
-    private static func flacPicture(_ data: Data) -> NSImage? {
+    nonisolated private static func flacPicture(_ data: Data) -> NSImage? {
         guard data.count >= 32 else { return nil }
         var pos = 4                                         // skip picture type (4)
         let mimeLen = Int(beu32(data, at: pos)); pos += 4 + mimeLen
@@ -300,7 +302,7 @@ enum MetadataIO {
 
     // MARK: WAV / RIFF parser
 
-    private static func parseWAV(_ data: Data, into meta: inout TrackMetadata) {
+    nonisolated private static func parseWAV(_ data: Data, into meta: inout TrackMetadata) {
         guard data.count >= 12,
               data[0]==0x52, data[1]==0x49, data[2]==0x46, data[3]==0x46,  // "RIFF"
               data[8]==0x57, data[9]==0x41, data[10]==0x56, data[11]==0x45  // "WAVE"
@@ -325,7 +327,7 @@ enum MetadataIO {
         }
     }
 
-    private static func parseRIFFInfo(_ data: Data, start: Int, end: Int, into meta: inout TrackMetadata) {
+    nonisolated private static func parseRIFFInfo(_ data: Data, start: Int, end: Int, into meta: inout TrackMetadata) {
         var pos = start
         while pos + 8 <= end {
             guard let id = ascii(data, at: pos, len: 4) else { break }
@@ -351,7 +353,7 @@ enum MetadataIO {
 
     // MARK: AVFoundation fallback  (M4A, AAC, CAF, …)
 
-    private static func parseWithAVFoundation(url: URL, into meta: inout TrackMetadata) {
+    nonisolated private static func parseWithAVFoundation(url: URL, into meta: inout TrackMetadata) {
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
         let sem = DispatchSemaphore(value: 0)
         asset.loadValuesAsynchronously(forKeys: ["commonMetadata", "availableMetadataFormats"]) { sem.signal() }
@@ -405,11 +407,11 @@ enum MetadataIO {
         }
     }
 
-    static func canWrite(ext: String) -> Bool {
+    nonisolated static func canWrite(ext: String) -> Bool {
         ["mp3", "flac"].contains(ext.lowercased())
     }
 
-    static func write(_ meta: TrackMetadata, to url: URL) throws {
+    nonisolated static func write(_ meta: TrackMetadata, to url: URL) throws {
         switch url.pathExtension.lowercased() {
         case "mp3":  try writeMP3(meta, to: url)
         case "flac": try writeFLAC(meta, to: url)
@@ -419,7 +421,7 @@ enum MetadataIO {
 
     // MARK: MP3 writer — ID3v2.3 header + ID3v1 tail
 
-    private static func writeMP3(_ meta: TrackMetadata, to url: URL) throws {
+    nonisolated private static func writeMP3(_ meta: TrackMetadata, to url: URL) throws {
         let file = try Data(contentsOf: url)
 
         // Skip existing ID3v2 block
@@ -481,7 +483,7 @@ enum MetadataIO {
         }
     }
 
-    private static func buildID3v1(_ meta: TrackMetadata) -> Data {
+    nonisolated private static func buildID3v1(_ meta: TrackMetadata) -> Data {
         var tag = Data(count: 128)
         tag[0] = 0x54; tag[1] = 0x41; tag[2] = 0x47   // "TAG"
         func wr(_ s: String, at start: Int, maxLen: Int) {
@@ -505,7 +507,7 @@ enum MetadataIO {
 
     // MARK: FLAC writer — rewrites Vorbis Comment + PICTURE block
 
-    private static func writeFLAC(_ meta: TrackMetadata, to url: URL) throws {
+    nonisolated private static func writeFLAC(_ meta: TrackMetadata, to url: URL) throws {
         let file = try Data(contentsOf: url)
         guard file.count >= 4,
               file[0]==0x66, file[1]==0x4C, file[2]==0x61, file[3]==0x43
@@ -561,7 +563,7 @@ enum MetadataIO {
         }
     }
 
-    private static func buildVorbisComment(_ meta: TrackMetadata) -> Data {
+    nonisolated private static func buildVorbisComment(_ meta: TrackMetadata) -> Data {
         var pairs = [String]()
         if !meta.title.isEmpty       { pairs.append("TITLE=\(meta.title)") }
         if !meta.artist.isEmpty      { pairs.append("ARTIST=\(meta.artist)") }
@@ -578,7 +580,7 @@ enum MetadataIO {
         return d
     }
 
-    private static func buildFLACPicture(_ image: NSImage) -> Data? {
+    nonisolated private static func buildFLACPicture(_ image: NSImage) -> Data? {
         guard let jpg = image.jpegRepresentation else { return nil }
         let mime = "image/jpeg".data(using: .ascii)!
         var d = Data()
@@ -594,7 +596,7 @@ enum MetadataIO {
     // MARK: - ID3 frame decoders
 
     /// Decode a text frame payload (encoding byte + text bytes)
-    private static func id3Text(_ data: Data.SubSequence) -> String? {
+    nonisolated private static func id3Text(_ data: Data.SubSequence) -> String? {
         guard !data.isEmpty else { return nil }
         let enc  = data[data.startIndex]
         let body = Data(data[(data.startIndex+1)...])
@@ -602,7 +604,7 @@ enum MetadataIO {
     }
 
     /// Decode a COMM frame payload → returns the actual comment text
-    private static func id3Comment(_ data: Data.SubSequence) -> String? {
+    nonisolated private static func id3Comment(_ data: Data.SubSequence) -> String? {
         guard data.count >= 5 else { return nil }
         let enc  = data[data.startIndex]
         // skip encoding(1) + language(3) = 4 bytes, then find null-terminated short description
@@ -618,7 +620,7 @@ enum MetadataIO {
     }
 
     /// Encoding-aware string decode: 0=Latin-1, 1=UTF-16+BOM, 2=UTF-16BE, 3=UTF-8
-    private static func id3String(_ data: Data, enc: UInt8) -> String? {
+    nonisolated private static func id3String(_ data: Data, enc: UInt8) -> String? {
         guard !data.isEmpty else { return nil }
         let bytes = Array(data)
         let raw: String?
@@ -640,7 +642,7 @@ enum MetadataIO {
     }
 
     /// Decode APIC frame payload → NSImage
-    private static func apicImage(_ data: Data.SubSequence) -> NSImage? {
+    nonisolated private static func apicImage(_ data: Data.SubSequence) -> NSImage? {
         guard !data.isEmpty else { return nil }
         let enc = data[data.startIndex]
         var i   = data.startIndex + 1
@@ -658,7 +660,7 @@ enum MetadataIO {
     }
 
     /// Decode ID3v2.2 PIC frame (3-char format instead of MIME string)
-    private static func v22Picture(_ data: Data.SubSequence) -> NSImage? {
+    nonisolated private static func v22Picture(_ data: Data.SubSequence) -> NSImage? {
         guard data.count >= 5 else { return nil }
         let enc = data[data.startIndex]
         var i   = data.startIndex + 5   // encoding(1) + format(3) + picture-type(1)
@@ -672,8 +674,8 @@ enum MetadataIO {
     }
 
     // Convenience: decode and set a metadata string only if the field is still empty
-    private static func setIfEmpty(_ field: inout String, text payload: Data.SubSequence,
-                                   transform: ((String) -> String)? = nil) {
+    nonisolated private static func setIfEmpty(_ field: inout String, text payload: Data.SubSequence,
+                                               transform: ((String) -> String)? = nil) {
         guard field.isEmpty, let s = id3Text(payload) else { return }
         field = transform?(s) ?? s
     }
@@ -681,7 +683,7 @@ enum MetadataIO {
     // MARK: - Genre helpers
 
     // ID3 genre can be "(12)", "(12)Rock", or plain text. Decode the numeric prefix.
-    private static func cleanGenre(_ raw: String) -> String {
+    nonisolated private static func cleanGenre(_ raw: String) -> String {
         let s = raw.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("("), let close = s.firstIndex(of: ")") {
             if let idx = Int(s[s.index(after: s.startIndex)..<close]) {
@@ -692,12 +694,12 @@ enum MetadataIO {
         return s
     }
 
-    private static func id3v1Genre(_ index: UInt8) -> String {
+    nonisolated private static func id3v1Genre(_ index: UInt8) -> String {
         let i = Int(index); return i < id3v1Genres.count ? id3v1Genres[i] : ""
     }
 
     // Standard ID3v1 genre list (indices 0-79 per spec + common Winamp extensions)
-    private static let id3v1Genres: [String] = [
+    nonisolated private static let id3v1Genres: [String] = [
         "Blues","Classic Rock","Country","Dance","Disco","Funk","Grunge","Hip-Hop","Jazz",
         "Metal","New Age","Oldies","Other","Pop","R&B","Rap","Reggae","Rock","Techno",
         "Industrial","Alternative","Ska","Death Metal","Pranks","Soundtrack","Euro-Techno",
@@ -714,20 +716,20 @@ enum MetadataIO {
     // MARK: - Binary read helpers  (absolute-index into a Data value)
 
     /// 4-byte synchsafe integer (ID3v2 header / ID3v2.4 frame sizes)
-    private static func desynchsafe4(_ d: Data, at p: Int) -> Int {
+    nonisolated private static func desynchsafe4(_ d: Data, at p: Int) -> Int {
         (Int(d[p]   & 0x7F) << 21) | (Int(d[p+1] & 0x7F) << 14) |
         (Int(d[p+2] & 0x7F) <<  7) |  Int(d[p+3] & 0x7F)
     }
     /// 4-byte big-endian unsigned int
-    private static func beu32(_ d: Data, at p: Int) -> UInt32 {
+    nonisolated private static func beu32(_ d: Data, at p: Int) -> UInt32 {
         (UInt32(d[p]) << 24) | (UInt32(d[p+1]) << 16) | (UInt32(d[p+2]) << 8) | UInt32(d[p+3])
     }
     /// 4-byte little-endian unsigned int
-    private static func leu32(_ d: Data, at p: Int) -> UInt32 {
+    nonisolated private static func leu32(_ d: Data, at p: Int) -> UInt32 {
         UInt32(d[p]) | (UInt32(d[p+1]) << 8) | (UInt32(d[p+2]) << 16) | (UInt32(d[p+3]) << 24)
     }
     /// ASCII/Latin-1 string of given byte length
-    private static func ascii(_ d: Data, at p: Int, len: Int) -> String? {
+    nonisolated private static func ascii(_ d: Data, at p: Int, len: Int) -> String? {
         guard p + len <= d.count else { return nil }
         return String(bytes: d[p..<p+len], encoding: .isoLatin1)
     }
@@ -738,23 +740,23 @@ enum MetadataIO {
 private extension Data {
 
     /// Append a 4-byte big-endian unsigned int
-    mutating func appendBE32(_ v: UInt32) {
+    nonisolated mutating func appendBE32(_ v: UInt32) {
         append(UInt8((v >> 24) & 0xFF)); append(UInt8((v >> 16) & 0xFF))
         append(UInt8((v >>  8) & 0xFF)); append(UInt8( v        & 0xFF))
     }
     /// Append a 4-byte little-endian unsigned int
-    mutating func appendLE32(_ v: UInt32) {
+    nonisolated mutating func appendLE32(_ v: UInt32) {
         append(UInt8( v        & 0xFF)); append(UInt8((v >>  8) & 0xFF))
         append(UInt8((v >> 16) & 0xFF)); append(UInt8((v >> 24) & 0xFF))
     }
     /// Append an ID3v2.3 frame (4-char ID, plain big-endian size, 2 zero flags)
-    mutating func appendID3Frame(id: String, payload: Data) {
+    nonisolated mutating func appendID3Frame(id: String, payload: Data) {
         guard let idBytes = id.data(using: .ascii), idBytes.count == 4 else { return }
         append(idBytes); appendBE32(UInt32(payload.count))
         append(contentsOf: [0x00, 0x00]); append(payload)
     }
     /// Append 4 bytes as a synchsafe integer (ID3v2 tag header size field)
-    mutating func appendSynchsafe32(_ v: UInt32) {
+    nonisolated mutating func appendSynchsafe32(_ v: UInt32) {
         append(UInt8((v >> 21) & 0x7F)); append(UInt8((v >> 14) & 0x7F))
         append(UInt8((v >>  7) & 0x7F)); append(UInt8( v        & 0x7F))
     }
@@ -763,7 +765,7 @@ private extension Data {
 // MARK: - NSImage → JPEG data
 
 private extension NSImage {
-    var jpegRepresentation: Data? {
+    nonisolated var jpegRepresentation: Data? {
         guard let tiff = tiffRepresentation,
               let rep  = NSBitmapImageRep(data: tiff) else { return nil }
         return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
@@ -773,5 +775,5 @@ private extension NSImage {
 // MARK: - String non-empty helper
 
 private extension String {
-    var nonEmpty: String? { isEmpty ? nil : self }
+    nonisolated var nonEmpty: String? { isEmpty ? nil : self }
 }

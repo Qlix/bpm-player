@@ -13,7 +13,7 @@ import Accelerate
 
 struct BPMDetector {
 
-    static func detect(file: AVAudioFile) -> Double {
+    nonisolated static func detect(file: AVAudioFile) -> Double {
 
         let format      = file.processingFormat
         let sampleRate  = Float(format.sampleRate)

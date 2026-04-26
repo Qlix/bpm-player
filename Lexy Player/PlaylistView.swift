@@ -23,6 +23,9 @@ struct PlaylistView: View {
     @State private var freshDropURLs:      [URL] = []   // non-dupes ready to add
     @State private var showDuplicateAlert  = false
 
+    // Convert sheet — use sheet(item:) so track IDs are always fresh on open
+    @State private var convertSheetData: ConvertSheetData? = nil
+
     // Import / export state
     @State private var pendingImportURLs:     [URL] = []
     @State private var showImportSheet        = false
@@ -69,6 +72,12 @@ struct PlaylistView: View {
                 .environmentObject(playlist)
                 .environmentObject(engine)
         }
+        // Convert sheet — item carries the track IDs so they're always fresh
+        .sheet(item: $convertSheetData) { data in
+            ConvertView(initialTrackIDs: data.trackIDs)
+                .environmentObject(playlist)
+        }
+
         // Duplicate tracks alert (shown when dropped files are already in the playlist)
         .alert("Duplicate Tracks", isPresented: $showDuplicateAlert) {
             Button("Add Anyway") {
@@ -136,13 +145,14 @@ struct PlaylistView: View {
         List {
             ForEach(playlist.tracks) { track in
                 TrackRow(
-                    track:       track,
-                    isCurrent:   track.id == playlist.currentTrackID,
-                    isSelected:  selection.contains(track.id),
-                    onPlay:      { playTrack(track) },
-                    onSingleTap: { handleRowTap(track) },
-                    onInfo:      { showInfoPanel(for: track) },
-                    onBPMChange: { newBPM in
+                    track:        track,
+                    isCurrent:    track.id == playlist.currentTrackID,
+                    isSelected:   selection.contains(track.id),
+                    onPlay:       { playTrack(track) },
+                    onSingleTap:  { handleRowTap(track) },
+                    onRightClick: { handleRightClick(track) },
+                    onInfo:       { showInfoPanel(for: track) },
+                    onBPMChange:  { newBPM in
                         playlist.updateBPM(for: track.id, bpm: newBPM)
                         if track.id == playlist.currentTrackID {
                             engine.detectedBPM = newBPM
@@ -152,9 +162,13 @@ struct PlaylistView: View {
                 .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                 .listRowBackground(rowBackground(for: track))
                 .contextMenu {
+                    let batch: Set<UUID> = selection.contains(track.id) ? selection : [track.id]
+
+                    Button("Convert…") {
+                        convertSheetData = ConvertSheetData(trackIDs: batch)
+                    }
                     Button("View Info") { showInfoPanel(for: track) }
                     Divider()
-                    let batch: Set<UUID> = selection.contains(track.id) ? selection : [track.id]
                     if batch.count > 1 {
                         Button("Remove \(batch.count) tracks", role: .destructive) {
                             deleteByIDs(batch)
@@ -257,6 +271,15 @@ struct PlaylistView: View {
 
         } else {
             // Plain click — select only this row
+            selection = [track.id]
+            anchorID  = track.id
+        }
+    }
+
+    /// Right-click: select this track if it is not already part of the selection,
+    /// then let the context menu appear with the correct `batch`.
+    private func handleRightClick(_ track: PlaylistManager.Track) {
+        if !selection.contains(track.id) {
             selection = [track.id]
             anchorID  = track.id
         }
@@ -394,14 +417,13 @@ struct PlaylistView: View {
 
     private func importPlaylist() {
         let panel = NSOpenPanel()
-        panel.title = "Import Playlist"
+        panel.title   = "Import M3U Playlist"
+        panel.message = "Select an M3U or M3U8 playlist file"
         panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories    = false
         panel.allowedContentTypes = [
-            UTType(filenameExtension: "m3u")   ?? .plainText,
-            UTType(filenameExtension: "m3u8")  ?? .plainText,
-            UTType(filenameExtension: "xml")   ?? .xml,
-            UTType(filenameExtension: "crate") ?? .data,
+            UTType(filenameExtension: "m3u")  ?? .plainText,
+            UTType(filenameExtension: "m3u8") ?? .plainText,
         ]
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
@@ -561,13 +583,14 @@ private struct TrackRow: View {
 
     @EnvironmentObject private var engine: AudioEngine
 
-    let track:       PlaylistManager.Track
-    let isCurrent:   Bool
-    let isSelected:  Bool
-    let onPlay:      () -> Void
-    let onSingleTap: () -> Void
-    let onInfo:      () -> Void
-    let onBPMChange: (Double) -> Void
+    let track:        PlaylistManager.Track
+    let isCurrent:    Bool
+    let isSelected:   Bool
+    let onPlay:       () -> Void
+    let onSingleTap:  () -> Void
+    let onRightClick: () -> Void
+    let onInfo:       () -> Void
+    let onBPMChange:  (Double) -> Void
 
     @State private var isEditingBPM = false
     @State private var bpmInput     = ""
@@ -607,6 +630,13 @@ private struct TrackRow: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { onPlay() })
         .simultaneousGesture(TapGesture(count: 1).onEnded { onSingleTap() })
         .padding(.vertical, 5)
+        // Transparent overlay that claims right-click events so we can update
+        // selection BEFORE the context menu ViewBuilder evaluates `batch`.
+        // hitTest returns nil for all other events, letting them pass through.
+        .overlay(
+            RightClickAware(onRightClick: onRightClick)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
     }
 
     @ViewBuilder
@@ -646,6 +676,43 @@ private struct TrackRow: View {
     private func cancelBPM() {
         isEditingBPM = false
         // bpmFocused becomes false automatically; original BPM value is unchanged
+    }
+}
+
+// MARK: - Right-click-aware overlay
+//
+// A zero-height NSView overlay that intercepts right-mouse-down events so the
+// SwiftUI selection state is updated BEFORE the .contextMenu ViewBuilder runs.
+// For all other event types hitTest returns nil, so left-clicks, drags, etc.
+// pass straight through to the underlying SwiftUI content.
+
+private struct RightClickAware: NSViewRepresentable {
+    var onRightClick: () -> Void
+
+    func makeNSView(context: Context) -> RCAView { RCAView(onRightClick: onRightClick) }
+    func updateNSView(_ v: RCAView, context: Context) { v.onRightClick = onRightClick }
+
+    class RCAView: NSView {
+        var onRightClick: () -> Void
+
+        init(onRightClick: @escaping () -> Void) {
+            self.onRightClick = onRightClick
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        // Claim the hit only when a right-click is in progress.
+        // All other events fall through to the SwiftUI views underneath.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let e = NSApp.currentEvent, e.type == .rightMouseDown else { return nil }
+            return bounds.contains(point) ? self : nil
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            onRightClick()
+            // Forward up the responder chain so .contextMenu can present the menu.
+            nextResponder?.rightMouseDown(with: event)
+        }
     }
 }
 

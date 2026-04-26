@@ -14,6 +14,25 @@ extension Color {
             blue:  Double(v         & 0xFF) / 255
         )
     }
+
+    /// Returns a color that automatically adapts to light / dark mode
+    /// using macOS's native dynamic NSColor provider.
+    init(light lightHex: String, dark darkHex: String) {
+        func nsColor(_ hex: String) -> NSColor {
+            let h = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+            let v = UInt64(h, radix: 16) ?? 0
+            return NSColor(
+                red:   CGFloat((v >> 16) & 0xFF) / 255,
+                green: CGFloat((v >>  8) & 0xFF) / 255,
+                blue:  CGFloat( v        & 0xFF) / 255,
+                alpha: 1
+            )
+        }
+        self.init(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? nsColor(darkHex) : nsColor(lightHex)
+        })
+    }
 }
 
 // MARK: - CGFloat clamp (local)
@@ -25,16 +44,16 @@ private extension CGFloat {
 // MARK: - Pill button style
 
 private struct PillButtonStyle: ButtonStyle {
-    var width:           CGFloat = 27
-    var isActive:        Bool    = false
-    var activeBackground: Color  = Color(hex: "d4d4d3")
+    var width:            CGFloat = 27
+    var isActive:         Bool    = false
+    var activeBackground: Color   = Color(light: "d4d4d3", dark: "505050")
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .frame(width: width, height: 24)
             .background(
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(isActive ? activeBackground : Color(hex: "f6f6f5"))
+                    .fill(isActive ? activeBackground : Color(light: "f6f6f5", dark: "3c3c3c"))
                     .shadow(color: .black.opacity(0.25), radius: 0.5, x: 0, y: 0)
             )
             .opacity(configuration.isPressed ? 0.75 : 1.0)
@@ -60,13 +79,13 @@ private struct PillSlider: View {
                 Capsule()
                     .fill(LinearGradient(
                         stops: [
-                            .init(color: Color(hex: "B7B7B7"), location: 0),
-                            .init(color: Color(hex: "CECECE"), location: 0.505),
-                            .init(color: Color(hex: "DCDCDC"), location: 1)
+                            .init(color: Color(light: "B7B7B7", dark: "383838"), location: 0),
+                            .init(color: Color(light: "CECECE", dark: "424242"), location: 0.505),
+                            .init(color: Color(light: "DCDCDC", dark: "4a4a4a"), location: 1)
                         ],
                         startPoint: .top, endPoint: .bottom
                     ))
-                    .overlay(Capsule().strokeBorder(Color(hex: "B8B8B8"), lineWidth: 0.5))
+                    .overlay(Capsule().strokeBorder(Color(light: "B8B8B8", dark: "2a2a2a"), lineWidth: 0.5))
                     .frame(height: kTrack)
 
                 Circle()
@@ -109,15 +128,15 @@ private struct BPMToggle: View {
                       ? AnyShapeStyle(Color.accentColor)
                       : AnyShapeStyle(LinearGradient(
                             stops: [
-                                .init(color: Color(hex: "B7B7B7"), location: 0),
-                                .init(color: Color(hex: "CECECE"), location: 0.505),
-                                .init(color: Color(hex: "DCDCDC"), location: 1)
+                                .init(color: Color(light: "B7B7B7", dark: "383838"), location: 0),
+                                .init(color: Color(light: "CECECE", dark: "424242"), location: 0.505),
+                                .init(color: Color(light: "DCDCDC", dark: "4a4a4a"), location: 1)
                             ],
                             startPoint: .top, endPoint: .bottom
                         ))
                 )
                 .overlay(Capsule().strokeBorder(
-                    isOn ? Color.accentColor.opacity(0.7) : Color(hex: "B8B8B8"),
+                    isOn ? Color.accentColor.opacity(0.7) : Color(light: "B8B8B8", dark: "2a2a2a"),
                     lineWidth: 0.5
                 ))
                 .animation(.spring(duration: 0.18, bounce: 0.25), value: isOn)
@@ -161,20 +180,20 @@ private struct VolumeSlider: View {
             ZStack(alignment: .leading) {
                 // grey track
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Color(hex: "AEAFAF"))
+                    .fill(Color(light: "AEAFAF", dark: "555555"))
                     .frame(height: kTrack)
                     .padding(.horizontal, kThumb / 2)
 
                 // 0 dB tick
                 Rectangle()
-                    .fill(Color.black)
+                    .fill(Color.primary)
                     .frame(width: 1, height: kHeight + 2)
                     .offset(x: tickX + kThumb / 2 - 0.5)
 
                 // knob
                 Circle()
                     .fill(.white)
-                    .overlay(Circle().strokeBorder(Color(hex: "C6C6C6"), lineWidth: 0.5))
+                    .overlay(Circle().strokeBorder(Color(light: "C6C6C6", dark: "555555"), lineWidth: 0.5))
                     .frame(width: kThumb, height: kThumb)
                     .offset(x: thumbX)
                     .allowsHitTesting(false)
@@ -204,6 +223,9 @@ struct ContentView: View {
 
     /// Bound to RootView — toggling this expands/collapses the playlist panel.
     @Binding var playlistVisible: Bool
+
+    // Observe the singleton so SwiftUI re-renders when pendingURL changes.
+    @ObservedObject private var fileRouter = FileOpenRouter.shared
 
     @State private var sliderValue      = 0.0
     @State private var isSeeking        = false
@@ -239,25 +261,25 @@ struct ContentView: View {
                 Button { playPrevious() } label: {
                     Image(systemName: "backward.end.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(.primary)
                 }
                 .buttonStyle(PillButtonStyle(width: 27))
                 .disabled(!engine.hasFile)
                 .help("Previous track  ⌘←")
 
-                Button { engine.togglePlay() } label: {
+                Button { handlePlayButton() } label: {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(.primary)
                 }
                 .buttonStyle(PillButtonStyle(width: 27))
-                .disabled(!engine.hasFile)
+                .disabled(!engine.hasFile && playlist.tracks.isEmpty)
                 .help(engine.isPlaying ? "Pause  Space" : "Play  Space")
 
                 Button { playNext() } label: {
                     Image(systemName: "forward.end.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(.primary)
                 }
                 .buttonStyle(PillButtonStyle(width: 27))
                 .disabled(!engine.hasFile)
@@ -266,7 +288,7 @@ struct ContentView: View {
                 Button { togglePlaylist() } label: {
                     VStack(spacing: 3) {
                         ForEach(0..<3, id: \.self) { _ in
-                            Rectangle().fill(Color.black).frame(width: 13, height: 1)
+                            Rectangle().fill(Color.primary).frame(width: 13, height: 1)
                         }
                     }
                 }
@@ -292,7 +314,7 @@ struct ContentView: View {
                 // ① time — tap to toggle elapsed ↔ remaining
                 Text(timeText)
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.black)
+                    .foregroundStyle(.primary)
                     .frame(width: 44, alignment: .center)
                     .contentShape(Rectangle())
                     .onTapGesture { if engine.hasFile { showRemainingTime.toggle() } }
@@ -316,7 +338,7 @@ struct ContentView: View {
                     .frame(width: 50, height: 24)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(Color(hex: "f6f6f5"))
+                            .fill(Color(light: "f6f6f5", dark: "3c3c3c"))
                             .shadow(color: .black.opacity(0.25), radius: 0.5)
                     )
                     .focused($bpmFocused)
@@ -353,10 +375,10 @@ struct ContentView: View {
                 Button { engine.toggleMasterTempo() } label: {
                     Text("KEY LOCK")
                         .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(engine.masterTempo ? Color.accentColor : .black)
+                        .foregroundStyle(engine.masterTempo ? Color.accentColor : .primary)
                 }
                 .buttonStyle(PillButtonStyle(width: 65, isActive: engine.masterTempo,
-                                             activeBackground: Color(hex: "EBF1FE")))
+                                             activeBackground: Color(light: "EBF1FE", dark: "1e3260")))
                 .help(engine.masterTempo
                       ? "Master Tempo ON — pitch stays constant"
                       : "Master Tempo OFF — pitch shifts with speed")
@@ -385,9 +407,9 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 32)
-        .background(Color(hex: "e7e7e7"))
+        .background(Color(light: "e7e7e7", dark: "2c2c2c"))
         .overlay(alignment: .top) {
-            Rectangle().fill(Color(hex: "c6c6c6")).frame(height: 0.5)
+            Rectangle().fill(Color(light: "c6c6c6", dark: "1c1c1c")).frame(height: 0.5)
         }
         .background(WindowPinHelper(isPinned: isPinned, title: currentTrackTitle))
         .onDrop(of: [.fileURL], isTargeted: $isDragTarget, perform: handleDrop)
@@ -410,27 +432,32 @@ struct ContentView: View {
                 fieldText = String(Int(bpm))
             }
         }
+        // BPM arrived from background scan of an external (Finder-opened) file.
+        // Only act when there is no current playlist track — that's the external state.
+        .onChange(of: engine.detectedBPM) { bpm in
+            guard playlist.currentTrackID == nil, bpm > 0 else { return }
+            if bpmEnabled, userTargetBPM > 0 {
+                engine.applyTargetBPM(userTargetBPM)
+                fieldText = String(Int(userTargetBPM))
+            } else {
+                fieldText = String(Int(bpm))
+            }
+        }
         .onReceive(engine.trackFinishedPublisher) { _ in playNext() }
-        .onReceive(NotificationCenter.default.publisher(for: .openAudioFile)) { note in
-            guard let url = note.object as? URL else { return }
-            // Opened from Finder: play without touching the playlist.
-            // Clear currentTrackID so the header falls back to engine.fileName.
-            playlist.currentTrackID = nil
-            engine.loadURL(url)
-            // Read ID3 tags in the background so the header shows
-            // "Artist - Title" instead of just the raw filename.
-            Task.detached(priority: .userInitiated) {
-                let meta   = MetadataIO.read(from: url)
-                let t      = meta.title.isEmpty  ? nil : meta.title
-                let a      = meta.artist.isEmpty ? nil : meta.artist
-                let name: String
-                switch (a, t) {
-                case let (a?, t?): name = "\(a) - \(t)"
-                case let (nil, t?): name = t
-                case let (a?, nil): name = a
-                default:            name = url.deletingPathExtension().lastPathComponent
-                }
-                await MainActor.run { engine.fileName = name }
+        // React to files opened from Finder (via AppDelegate → FileOpenRouter).
+        // fileRouter is @ObservedObject so ContentView re-renders when pendingURL changes,
+        // which makes onChange fire reliably.
+        .onChange(of: fileRouter.pendingURL) { url in
+            print("🎵 [ContentView.onChange] pendingURL=\(url?.path ?? "nil")")
+            guard let url else { return }
+            fileRouter.pendingURL = nil
+            openExternalFile(url)
+        }
+        .onAppear {
+            print("🎵 [ContentView.onAppear] pendingURL=\(fileRouter.pendingURL?.path ?? "nil")")
+            if let url = fileRouter.pendingURL {
+                fileRouter.pendingURL = nil
+                openExternalFile(url)
             }
         }
         // Media keys (keyboard ⏮ ⏯ ⏭)
@@ -458,6 +485,18 @@ struct ContentView: View {
                     .opacity(0)
             }
         )
+    }
+
+    // MARK: External file open (Finder double-click / file association)
+
+    /// Loads and immediately plays a file opened from outside the app.
+    /// Does not touch the playlist — leaves it intact.
+    private func openExternalFile(_ url: URL) {
+        print("🎵 [openExternalFile] \(url.path)")
+        bpmFocused = false                          // drop focus from BPM field
+        playlist.currentTrackID = nil              // deselect playlist — track is external
+        fieldText = String(Int(userTargetBPM))     // clear old BPM display immediately
+        engine.loadExternalURL(url)                // play ASAP + BPM scan in background
     }
 
     // MARK: Time display
@@ -520,6 +559,23 @@ struct ContentView: View {
               let idx = tracks.firstIndex(where: { $0.id == id }),
               idx > 0 else { return }
         playTrackAtIndex(idx - 1)
+    }
+
+    private func handlePlayButton() {
+        if engine.hasFile {
+            engine.togglePlay()
+        } else if !playlist.tracks.isEmpty {
+            // Nothing loaded yet — start from playlist
+            if playlist.isShuffled,
+               let nextID = playlist.randomNextTrackID(excluding: nil),
+               let track  = playlist.tracks.first(where: { $0.id == nextID }) {
+                playlist.currentTrackID = nextID
+                if let bpm = track.bpm, bpm > 0, !track.isScanning { engine.detectedBPM = bpm }
+                engine.loadURL(track.url)
+            } else {
+                playTrackAtIndex(0)
+            }
+        }
     }
 
     private func playNext() {
