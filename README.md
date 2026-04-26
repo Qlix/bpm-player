@@ -1,6 +1,6 @@
 # BPM Player
 
-**Fast, simple audio player with BPM — built for DJs and producers.**
+**Fast, simple audio player with BPM. Built by a DJ.**
 
 Load a track and press play. Everything else stays out of the way until you need it.
 
