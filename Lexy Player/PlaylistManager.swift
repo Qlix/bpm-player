@@ -90,6 +90,16 @@ final class PlaylistManager: ObservableObject {
 
     private var activeScopes: [URL: Bool] = [:]   // URL → whether we called startAccessing
 
+    // MARK: Serial BPM scan queue
+    //
+    // Tracks are scanned one at a time, top-to-bottom, in the order they were
+    // added.  This keeps CPU / memory pressure low while still delivering BPM
+    // values progressively — the track at the top of the list (likely playing)
+    // is always scanned first.
+
+    private var bpmScanQueue:     [(id: UUID, url: URL)] = []
+    private var isRunningBPMScan: Bool                   = false
+
     // MARK: Combine
 
     private var cancellables = Set<AnyCancellable>()
@@ -187,14 +197,22 @@ final class PlaylistManager: ObservableObject {
 
     // MARK: BPM scanning + tag reading (background)
 
+    /// Start metadata + BPM resolution for one track.
+    ///
+    /// Phase 1 (parallel, fast): reads ID3 / Vorbis / etc. tags.  If the BPM
+    /// field is already set in the file, we use it directly — no scan needed.
+    ///
+    /// Phase 2 (serial, slow): if no BPM tag exists, the track is added to the
+    /// FIFO `bpmScanQueue`.  The queue processes one track at a time so we never
+    /// run N parallel BPM analyses, which would thrash the CPU and cause audio
+    /// dropouts while the user is listening.
     private func scan(id: UUID, url: URL) {
         Task.detached(priority: .userInitiated) {
-            // ── Phase 1: tags (fast) ──────────────────────────────────────
-            // Read ID3 / Vorbis / etc. tags first so the UI shows the proper
-            // artist – title name as soon as possible, before BPM (slow).
+            // ── Phase 1: tags + ID3 BPM check (fast) ─────────────────────
             let meta   = MetadataIO.read(from: url)
             let title  = meta.title.isEmpty  ? nil : meta.title
             let artist = meta.artist.isEmpty ? nil : meta.artist
+            let tagBPM = Double(meta.bpm.trimmingCharacters(in: .whitespaces))
 
             await MainActor.run { [weak self] in
                 guard let self,
@@ -202,25 +220,63 @@ final class PlaylistManager: ObservableObject {
                 else { return }
                 self.tracks[idx].title  = title
                 self.tracks[idx].artist = artist
-                // isScanning stays true until BPM phase completes
+
+                if let bpm = tagBPM, bpm > 0 {
+                    // ✅ ID3 tag already has BPM — use it, skip the slow scan.
+                    self.tracks[idx].bpm        = bpm
+                    self.tracks[idx].isScanning = false
+                    self.saveToPersistence()
+                } else {
+                    // ⏳ No tag BPM — enqueue for serial scan.
+                    self.enqueueBPMScan(id: id, url: url)
+                }
+            }
+        }
+    }
+
+    private func enqueueBPMScan(id: UUID, url: URL) {
+        bpmScanQueue.append((id: id, url: url))
+        if !isRunningBPMScan { processBPMScanQueue() }
+    }
+
+    /// Dequeue and process one BPM scan at a time (serial FIFO).
+    ///
+    /// Runs BPMDetector in a background-priority detached task, then updates
+    /// the track and writes the BPM back to the file tag (only if the tag was
+    /// empty — never overwrites a user-set value).
+    private func processBPMScanQueue() {
+        guard !bpmScanQueue.isEmpty else {
+            isRunningBPMScan = false
+            return
+        }
+        isRunningBPMScan = true
+        let item = bpmScanQueue.removeFirst()
+        let scanID  = item.id
+        let scanURL = item.url
+
+        Task { [weak self] in
+            let bpm = await Task.detached(priority: .background) { () -> Double in
+                guard let file = try? AVAudioFile(forReading: scanURL) else { return 0 }
+                return BPMDetector.detect(file: file)
+            }.value
+
+            guard let self else { return }
+
+            // Write BPM back to the file tag so the scan only runs once per track.
+            if bpm > 0 {
+                let rounded = Int(bpm.rounded())
+                Task.detached(priority: .background) {
+                    MetadataIO.writeBPMIfEmpty(rounded, to: scanURL)
+                }
             }
 
-            // ── Phase 2: BPM (slow) ───────────────────────────────────────
-            let bpm: Double
-            if let file = try? AVAudioFile(forReading: url) {
-                bpm = BPMDetector.detect(file: file)
-            } else {
-                bpm = 0
-            }
-
-            await MainActor.run { [weak self] in
-                guard let self,
-                      let idx = self.tracks.firstIndex(where: { $0.id == id })
-                else { return }
+            // Update the playlist on the main actor, then kick off the next scan.
+            if let idx = self.tracks.firstIndex(where: { $0.id == scanID }) {
                 self.tracks[idx].bpm        = bpm
                 self.tracks[idx].isScanning = false
                 self.saveToPersistence()
             }
+            self.processBPMScanQueue()   // tail-call: process next item
         }
     }
 

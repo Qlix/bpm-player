@@ -411,6 +411,20 @@ enum MetadataIO {
         ["mp3", "flac"].contains(ext.lowercased())
     }
 
+    /// Write the detected BPM as an integer tag only if the file has no BPM value already.
+    ///
+    /// - Skips silently for unsupported formats (only .mp3 and .flac are writable).
+    /// - Skips silently if the existing tag already has a BPM value (respects user data).
+    /// - Safe to call from any thread (`nonisolated`).
+    nonisolated static func writeBPMIfEmpty(_ bpm: Int, to url: URL) {
+        let ext = url.pathExtension.lowercased()
+        guard canWrite(ext: ext) else { return }
+        var meta = read(from: url)
+        guard meta.bpm.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        meta.bpm = String(bpm)
+        try? write(meta, to: url)
+    }
+
     nonisolated static func write(_ meta: TrackMetadata, to url: URL) throws {
         switch url.pathExtension.lowercased() {
         case "mp3":  try writeMP3(meta, to: url)

@@ -351,6 +351,7 @@ struct ContentView: View {
                             get: { bpmEnabled },
                             set: { newVal in
                                 bpmEnabled = newVal
+                                engine.bpmSwitchEnabled = newVal   // keep engine in sync
                                 if newVal {
                                     if engine.detectedBPM > 0, userTargetBPM > 0 {
                                         engine.applyTargetBPM(userTargetBPM)
@@ -454,6 +455,11 @@ struct ContentView: View {
             openExternalFile(url)
         }
         .onAppear {
+            // Sync BPM switch state into the engine so loadExternalURL knows
+            // whether to hold playback for scanning before the user touches anything.
+            engine.bpmSwitchEnabled = bpmEnabled
+            engine.bpmTarget        = userTargetBPM
+
             print("🎵 [ContentView.onAppear] pendingURL=\(fileRouter.pendingURL?.path ?? "nil")")
             if let url = fileRouter.pendingURL {
                 fileRouter.pendingURL = nil
@@ -513,8 +519,10 @@ struct ContentView: View {
 
     private func handleBPMSubmit() {
         if let bpm = Double(fieldText), bpm > 0 {
-            userTargetBPM = bpm
-            bpmEnabled    = true
+            userTargetBPM           = bpm
+            engine.bpmTarget        = bpm    // keep engine in sync
+            bpmEnabled              = true
+            engine.bpmSwitchEnabled = true
             if engine.detectedBPM > 0 { engine.applyTargetBPM(bpm) }
             fieldText = String(Int(bpm))
         } else {

@@ -69,6 +69,27 @@ final class AudioEngine: ObservableObject {
     private var loadTask:    Task<Void, Never>?
     private var bpmScanTask: Task<Void, Never>?
 
+    // MARK: BPM switch state  (kept in sync from ContentView)
+
+    /// Mirrors the BPM toggle switch in the UI.  When true, external files are
+    /// played at `bpmTarget` speed, and playback is held until BPM is known.
+    var bpmSwitchEnabled: Bool = false
+    /// The user's target BPM (the value typed into the BPM field).
+    var bpmTarget: Double = 120
+
+    // MARK: Hold-playback state
+    //
+    // When an external file is opened with BPM switch ON and no ID3 BPM tag,
+    // we start decoding immediately (so the UI is responsive and the source node
+    // is built) but hold the actual audio start until the BPM scan finishes.
+    //
+    // Two flags cover both race conditions:
+    //   waitingForBPM = true  → decode completed, but don't call resumePlayback yet
+    //   decodeReady   = true  → source node is built; releaseHeldPlayback can play now
+
+    private var waitingForBPM = false
+    private var decodeReady   = false
+
     // MARK: Playback tracking
 
     private var seekBase  = 0.0
@@ -85,10 +106,19 @@ final class AudioEngine: ObservableObject {
 
     // MARK: File loading  (optimistic UI + async decode)
 
-    func loadURL(_ url: URL) {
-        print("🎵 [AudioEngine.loadURL] \(url.path)")
-        // Cancel any in-flight decode from a previous call
+    /// Load a URL and begin PCM decoding in the background.
+    ///
+    /// - Parameter holdPlayback: when `true` the decoded source node is built but
+    ///   `resumePlayback()` is deferred until `releaseHeldPlayback(bpm:)` is called.
+    ///   Used by `loadExternalURL` when BPM must be known before audio starts.
+    func loadURL(_ url: URL, holdPlayback: Bool = false) {
+        print("🎵 [AudioEngine.loadURL] \(url.path) hold=\(holdPlayback)")
+        // Cancel any in-flight decode or BPM scan from a previous call
         loadTask?.cancel()
+        bpmScanTask?.cancel()
+
+        waitingForBPM = holdPlayback
+        decodeReady   = false
 
         // ── Immediate UI update ───────────────────────────────────────────
         stopPlayback()
@@ -109,37 +139,102 @@ final class AudioEngine: ObservableObject {
                 self.pcmRight       = pcm.right
                 self.fileSampleRate = pcm.sampleRate
                 self.duration       = pcm.duration
-                print("🎵 [AudioEngine] decode done → rebuildSourceNode + resumePlayback")
                 self.rebuildSourceNode()
-                self.resumePlayback()
+                self.decodeReady = true
+
+                if self.waitingForBPM {
+                    // BPM scan is still running — source node is ready but
+                    // don't start audio yet. releaseHeldPlayback will call resumePlayback.
+                    print("🎵 [AudioEngine] decode done → waiting for BPM")
+                } else {
+                    print("🎵 [AudioEngine] decode done → resumePlayback")
+                    self.resumePlayback()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 print("🎵 [AudioEngine] decode ERROR: \(error)")
                 self.fileName = url.lastPathComponent + " — Error reading file"
                 self.hasFile  = false
+                self.waitingForBPM = false
             }
         }
     }
 
     /// Load a file opened externally (Finder double-click / file association).
     ///
-    /// - Clears `detectedBPM` immediately so the BPM field resets at once.
-    /// - Delegates to `loadURL` for the existing fast decode + playback path.
-    /// - Starts a low-priority BPM scan in parallel; on completion updates
-    ///   `detectedBPM`, which ContentView observes via `.onChange`.
+    /// Behaviour depends on the BPM switch:
+    ///
+    /// **Switch OFF** — play immediately at 1× speed, no BPM scan.
+    ///
+    /// **Switch ON + tag has BPM** — read tag (fast, no audio decode), apply rate,
+    /// play immediately.
+    ///
+    /// **Switch ON + no tag** — hold audio start until BPM scan completes, then
+    /// apply rate and begin playback.  The source node is built during the hold so
+    /// playback starts with zero latency once BPM is known.
     func loadExternalURL(_ url: URL) {
-        detectedBPM = 0          // clear old value right away
-        loadURL(url)             // fast path unchanged
+        detectedBPM = 0   // clear old value so UI resets immediately
 
-        bpmScanTask?.cancel()
+        guard bpmSwitchEnabled else {
+            // BPM switch is off — play at natural speed, skip scan entirely
+            loadURL(url)
+            return
+        }
+
+        // BPM switch is ON — start decode + concurrent tag read
+        loadURL(url, holdPlayback: true)
+
         bpmScanTask = Task {
-            guard let file = try? AVAudioFile(forReading: url) else { return }
+            // Phase 1: read the ID3/Vorbis BPM tag (only reads first 4 MB — fast)
+            let tagBPM: Double? = await Task.detached(priority: .userInitiated) {
+                let meta = MetadataIO.read(from: url)
+                let s = meta.bpm.trimmingCharacters(in: .whitespaces)
+                return s.isEmpty ? nil : Double(s)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            if let bpm = tagBPM, bpm > 0 {
+                // Tag already has BPM — release held playback immediately
+                print("🎵 [AudioEngine] tag BPM \(bpm) → releasing hold")
+                self.releaseHeldPlayback(bpm: bpm)
+                return
+            }
+
+            // Phase 2: no tag BPM — run full scan (slow, background priority)
+            print("🎵 [AudioEngine] no tag BPM → full scan")
+            guard let file = try? AVAudioFile(forReading: url) else {
+                self.releaseHeldPlayback(bpm: 0)   // release anyway; will play at 1×
+                return
+            }
             let bpm = await Task.detached(priority: .background) {
                 BPMDetector.detect(file: file)
             }.value
             guard !Task.isCancelled else { return }
-            self.detectedBPM = bpm   // @Published → ContentView re-renders
+            print("🎵 [AudioEngine] scan done → BPM \(bpm), releasing hold")
+            self.releaseHeldPlayback(bpm: bpm)
         }
+    }
+
+    /// Called when the BPM is known (from tag or scan) to apply rate and start audio.
+    ///
+    /// Handles both race conditions:
+    /// - BPM ready **before** decode: sets flags; decode completion starts playback.
+    /// - BPM ready **after** decode: source node already built; starts playback now.
+    private func releaseHeldPlayback(bpm: Double) {
+        waitingForBPM = false
+        detectedBPM   = bpm       // @Published — ContentView updates UI
+
+        if bpm > 0, bpmTarget > 0 {
+            let ratio = Float(bpmTarget / bpm).clamped(to: 0.25...4.0)
+            setRate(ratio)
+        }
+
+        if decodeReady {
+            resumePlayback()
+        }
+        // If decodeReady is still false, the loadTask will call resumePlayback()
+        // when PCM decoding finishes (because waitingForBPM is now false).
     }
 
     // Decode runs on a global background thread (Task.detached has no actor)
